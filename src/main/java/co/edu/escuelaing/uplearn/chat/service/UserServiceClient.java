@@ -133,7 +133,9 @@ public class UserServiceClient {
         }
     }
 
+    /** Excepción genérica para errores en UserServiceClient */
     public static class UserServiceException extends RuntimeException {
+        
         public UserServiceException(String message) {
             super(message);
         }

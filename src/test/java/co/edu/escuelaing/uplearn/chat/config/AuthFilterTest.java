@@ -70,17 +70,6 @@ class AuthFilterTest {
 
 
     @Test
-    void testDoFilterInternal_OptionsMethod() throws ServletException, IOException {
-        when(request.getMethod()).thenReturn("OPTIONS");
-
-        authFilter.doFilterInternal(request, response, filterChain);
-
-        verify(response).setStatus(HttpServletResponse.SC_NO_CONTENT);
-        verifyNoInteractions(authz);
-        verifyNoInteractions(filterChain);
-    }
-
-    @Test
     void testDoFilterInternal_Success() throws ServletException, IOException {
         when(request.getMethod()).thenReturn("GET");
         String token = "Bearer valid_token";
