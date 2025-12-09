@@ -245,4 +245,18 @@ public class ChatService {
             return "true".equalsIgnoreCase(s) || "1".equals(s);
         return false;
     }
+
+    /**
+     * Verifica si un usuario es participante de un chat
+     * 
+     * @param chatId ID del chat
+     * @param userId ID del usuario
+     * @return true si el usuario es participante, false en caso contrario
+     */
+    public boolean isParticipant(String chatId, String userId) {
+        return chats.findById(chatId)
+                .map(c -> c.getParticipants() != null && c.getParticipants().contains(userId))
+                .orElse(false);
+    }
+
 }

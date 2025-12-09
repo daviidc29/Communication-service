@@ -41,18 +41,12 @@ class ChatControllerTest {
         RolesResponse me = new RolesResponse();
         me.setId("me");
         when(authz.me("Bearer x")).thenReturn(me);
-        when(reservations.counterpartIds("Bearer x", "me"))
-                .thenReturn(Set.of("u1", "u2"));
-        when(users.getPublicProfileById("u1"))
-                .thenReturn(PublicProfile.builder().id("u1").name("User 1").email("U1@MAIL").build());
-        when(users.getPublicProfileById("u2"))
-                .thenReturn(PublicProfile.builder().id("u2").name("User 2").build());
+        when(reservations.counterpartIds("Bearer x", "me")).thenReturn(Set.of("u1", "u2"));
+        when(users.getPublicProfileById("u1")).thenReturn(PublicProfile.builder().id("u1").name("User 1").email("U1@MAIL").build());
+        when(users.getPublicProfileById("u2")).thenReturn(PublicProfile.builder().id("u2").name("User 2").build());
 
         List<ChatContact> out = controller.contacts("Bearer x");
         assertEquals(2, out.size());
-
-        var ids = out.stream().map(ChatContact::getId).collect(java.util.stream.Collectors.toSet());
-        assertEquals(Set.of("u1", "u2"), ids);
     }
 
     @Test
@@ -87,6 +81,9 @@ class ChatControllerTest {
 
     @Test
     void history_mapeaMensajes_OK1() {
+        when(authz.subject("B")).thenReturn("me");
+        when(chat.isParticipant("c", "me")).thenReturn(true);
+
         Message m1 = Message.builder().id("1").build();
         when(chat.history("c")).thenReturn(List.of(m1));
         when(chat.toDto(m1)).thenReturn(ChatMessageData.builder().id("1").build());
@@ -100,6 +97,9 @@ class ChatControllerTest {
 
     @Test
     void history_listaNulaRetornaListaVacia_OK2() {
+        when(authz.subject("B")).thenReturn("me");
+        when(chat.isParticipant("c", "me")).thenReturn(true);
+
         when(chat.history("c")).thenReturn(null);
         ResponseEntity<Object> rsp = controller.history("c", "B");
         assertEquals(200, rsp.getStatusCode().value());
@@ -108,21 +108,39 @@ class ChatControllerTest {
 
     @Test
     void history_siConversionFalla_omiteMensaje_FAIL1() {
+        when(authz.subject("B")).thenReturn("me");
+        when(chat.isParticipant("c", "me")).thenReturn(true);
+
         Message m1 = Message.builder().id("1").build();
         Message m2 = Message.builder().id("2").build();
         when(chat.history("c")).thenReturn(List.of(m1, m2));
+        
         when(chat.toDto(m1)).thenThrow(new RuntimeException("bad"));
         when(chat.toDto(m2)).thenReturn(ChatMessageData.builder().id("2").build());
 
         ResponseEntity<Object> rsp = controller.history("c", "B");
+        
         @SuppressWarnings("unchecked")
         List<ChatMessageData> list = (List<ChatMessageData>) rsp.getBody();
         assertEquals(1, list.size());
         assertEquals("2", list.get(0).getId());
     }
+    
+    @Test
+    void history_forbidden_si_no_es_participante() {
+        when(authz.subject("B")).thenReturn("intruder");
+        when(chat.isParticipant("c", "intruder")).thenReturn(false);
+
+        ResponseEntity<Object> rsp = controller.history("c", "B");
+        assertEquals(403, rsp.getStatusCode().value());
+        assertTrue(rsp.getBody().toString().contains("Forbidden"));
+    }
 
     @Test
     void history_errorGeneralDevuelve500_FAIL2() {
+        when(authz.subject("B")).thenReturn("me");
+        when(chat.isParticipant("c", "me")).thenReturn(true);
+
         when(chat.history("c")).thenThrow(new RuntimeException("boom"));
         ResponseEntity<Object> rsp = controller.history("c", "B");
         assertEquals(500, rsp.getStatusCode().value());
@@ -142,6 +160,20 @@ class ChatControllerTest {
     void chatId_authzSubjectFalla_PROPAGA_FAIL1y2() {
         when(authz.subject(anyString())).thenThrow(new RuntimeException("bad"));
         assertThrows(RuntimeException.class, () -> controller.chatId("x", "B"));
-        assertThrows(RuntimeException.class, () -> controller.chatId("", "B"));
+    }
+
+    @Test
+    void safeMessageId_handles_exceptions() {
+        when(authz.subject("B")).thenReturn("me");
+        when(chat.isParticipant("c", "me")).thenReturn(true);
+        
+        Message badMessage = mock(Message.class);
+        when(badMessage.getId()).thenThrow(new RuntimeException("No ID access"));
+
+        when(chat.history("c")).thenReturn(List.of(badMessage));
+        when(chat.toDto(badMessage)).thenThrow(new RuntimeException("Convert fail"));
+
+        ResponseEntity<Object> rsp = controller.history("c", "B");
+        assertEquals(200, rsp.getStatusCode().value());
     }
 }

@@ -71,27 +71,27 @@ public class ChatController {
      */
     @GetMapping("/history/{chatId}")
     public ResponseEntity<Object> history(
-            @PathVariable("chatId") String chatId,
-            @RequestHeader(value = "Authorization", required = false) String authorization) {
+            @PathVariable String chatId,
+            @RequestHeader("Authorization") String authorization) {
+
+        String meId = authz.subject(authorization);
+        if (!chat.isParticipant(chatId, meId)) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .body(Map.of("error", "Forbidden: not a participant of this chat"));
+        }
 
         try {
-            List<Message> raw = chat.history(chatId);
-            if (raw == null) {
+            var raw = chat.history(chatId);
+            if (raw == null)
                 return ResponseEntity.ok(List.of());
-            }
-
-            List<ChatMessageData> out = new ArrayList<>(raw.size());
-            for (Message m : raw) {
+            var out = new ArrayList<ChatMessageData>(raw.size());
+            for (Message m : raw)
                 addMessageIfConvertible(out, m, chatId);
-            }
             return ResponseEntity.ok(out);
-
         } catch (Exception e) {
-            log.error("Error cargando historial para chat {}: {}", chatId, e.toString(), e);
+            log.error("Error cargando historial {}: {}", chatId, e.toString(), e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of(
-                            "error", "Error cargando historial del chat",
-                            "details", e.getMessage()));
+                    .body(Map.of("error", "Error cargando historial", "details", e.getMessage()));
         }
     }
 
@@ -99,9 +99,9 @@ public class ChatController {
      * Intenta convertir un Message a ChatMessageData y añadirlo a la lista destino.
      * En caso de error, se loguea y se continúa sin romper el flujo.
      *
-     * @param target Lista destino donde agregar el DTO
+     * @param target  Lista destino donde agregar el DTO
      * @param message Mensaje de dominio a convertir
-     * @param chatId ID del chat (para logging)
+     * @param chatId  ID del chat (para logging)
      */
     private void addMessageIfConvertible(List<ChatMessageData> target, Message message, String chatId) {
         try {

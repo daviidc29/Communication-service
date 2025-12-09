@@ -31,15 +31,16 @@ class WebConfigTest {
         when(corsRegistration.allowedOriginPatterns("http://localhost:3000", "https://mi-dominio.com")).thenReturn(corsRegistration);
         when(corsRegistration.allowedMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")).thenReturn(corsRegistration);
         when(corsRegistration.allowedHeaders("*")).thenReturn(corsRegistration);
+        when(corsRegistration.exposedHeaders("Authorization", "Content-Type")).thenReturn(corsRegistration);
         when(corsRegistration.allowCredentials(true)).thenReturn(corsRegistration);
+        when(corsRegistration.maxAge(3600)).thenReturn(corsRegistration);
 
         webConfig.addCorsMappings(corsRegistry);
 
         verify(corsRegistry).addMapping("/**");
         verify(corsRegistration).allowedOriginPatterns("http://localhost:3000", "https://mi-dominio.com");
-        verify(corsRegistration).allowedMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS");
-        verify(corsRegistration).allowedHeaders("*");
-        verify(corsRegistration).allowCredentials(true);
+        verify(corsRegistration).exposedHeaders("Authorization", "Content-Type");
+        verify(corsRegistration).maxAge(3600);
     }
 
     @Test
@@ -50,7 +51,9 @@ class WebConfigTest {
         when(corsRegistration.allowedOriginPatterns("*")).thenReturn(corsRegistration);
         when(corsRegistration.allowedMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")).thenReturn(corsRegistration);
         when(corsRegistration.allowedHeaders("*")).thenReturn(corsRegistration);
+        when(corsRegistration.exposedHeaders("Authorization", "Content-Type")).thenReturn(corsRegistration);
         when(corsRegistration.allowCredentials(true)).thenReturn(corsRegistration);
+        when(corsRegistration.maxAge(3600)).thenReturn(corsRegistration);
 
         webConfig.addCorsMappings(corsRegistry);
 

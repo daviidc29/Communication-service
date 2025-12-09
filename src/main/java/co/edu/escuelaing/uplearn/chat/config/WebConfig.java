@@ -16,10 +16,10 @@ public class WebConfig implements WebMvcConfigurer {
     private String allowed;
 
     /**
-     * Configura los mapeos CORS para permitir solicitudes desde orígenes permitidos.
-     * Usa patrones para permitir comodines/subdominios sin usar '*' duro.
-     * 
-     * @param registry el registro de mapeos CORS
+     * Configura los mapeos CORS para la aplicación.
+     * Permite orígenes especificados en la propiedad 'app.cors.allowed-origins'.
+     *
+     * @param registry el registro de CORS
      */
     @Override
     public void addCorsMappings(CorsRegistry registry) {
@@ -27,6 +27,8 @@ public class WebConfig implements WebMvcConfigurer {
                 .allowedOriginPatterns(allowed.split(","))
                 .allowedMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
                 .allowedHeaders("*")
-                .allowCredentials(true);
+                .exposedHeaders("Authorization", "Content-Type")
+                .allowCredentials(true)
+                .maxAge(3600);
     }
 }
