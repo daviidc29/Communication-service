@@ -21,6 +21,7 @@ jobs:
           distribution: 'microsoft'
           cache: 'maven'
 
+      # Asegura que se genere un BOOT jar ejecutable
       - name: Build with Maven (boot jar)
         run: mvn -B clean package -DskipTests
 
@@ -29,37 +30,45 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "${{ github.workspace }}\azure-package" | Out-Null
 
+          # Toma el JAR "boot" (no sources/javadoc/original/plain). Debe pesar decenas de MB.
           $jar = Get-ChildItem -Path "${{ github.workspace }}\target" -Filter *.jar |
                  Where-Object { $_.Name -notmatch 'sources|javadoc|original|plain' } |
                  Sort-Object Length -Descending | Select-Object -First 1
-          if (-not $jar) { throw "No se encontró un JAR ejecutable en target." }
+          if (-not $jar) { throw "No se encontró un JAR ejecutable en target. Revisa el spring-boot-maven-plugin." }
+
+          Write-Host "Boot JAR: $($jar.Name) ($([math]::Round($jar.Length/1MB,2)) MB)"
+          if ($jar.Length -lt 20000000) { Write-Warning "El JAR pesa menos de 20MB; probablemente NO es un boot-jar." }
 
           Copy-Item $jar.FullName "${{ github.workspace }}\azure-package\app.jar" -Force
 
-          # web.config para Windows (HTTP_PLATFORM_PORT)
+          # web.config: IIS lanza 'java -Dserver.port=%HTTP_PLATFORM_PORT% -jar .\app.jar'
           @"
 <?xml version="1.0" encoding="utf-8"?>
 <configuration>
   <system.webServer>
     <handlers>
-      <add name="httpPlatformHandler" path="*" verb="*" modules="httpPlatformHandler" resourceType="Unspecified"/>
+      <add name="httpPlatformHandler" path="*" verb="*" modules="httpPlatformHandler" resourceType="Unspecified" />
     </handlers>
-    <httpPlatform processPath="java"
-                  arguments="-Dserver.port=%HTTP_PLATFORM_PORT% -jar &quot;.\app.jar&quot;"
-                  stdoutLogEnabled="true"
-                  stdoutLogFile=".\logs\stdout"
-                  startupTimeLimit="120"
-                  processesPerApplication="1">
+    <httpPlatform
+        processPath="java"
+        arguments="-Djava.net.preferIPv4Stack=true -Dserver.port=%HTTP_PLATFORM_PORT% -jar &quot;.\app.jar&quot;"
+        stdoutLogEnabled="true"
+        stdoutLogFile=".\logs\stdout"
+        startupTimeLimit="300"
+        processesPerApplication="1">
     </httpPlatform>
   </system.webServer>
 </configuration>
 "@ | Out-File -FilePath "${{ github.workspace }}\azure-package\web.config" -Encoding UTF8 -Force
 
+          # Empaqueta a ZIP (Run-From-Package)
+          Compress-Archive -Path "${{ github.workspace }}\azure-package\*" -DestinationPath "${{ github.workspace }}\chats-package.zip" -Force
+
       - name: Upload artifact for deploy
         uses: actions/upload-artifact@v4
         with:
           name: java-app
-          path: '${{ github.workspace }}/azure-package'
+          path: '${{ github.workspace }}/chats-package.zip'
 
   deploy:
     runs-on: windows-latest
@@ -82,8 +91,7 @@ jobs:
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_0DE79F80756B4D219BC382C784648F5A }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_8BDE2F9C0DE04E599F0868B0DF9928B2 }}
 
-      # (Opcional si ya las pusiste a mano en el portal)
-      # Empuja App Settings desde GitHub Secrets a la Web App "chats"
+      # Empuja App Settings a la Web App "chats"
       - name: Set Azure App Settings
         uses: azure/appservice-settings@v1
         with:
@@ -91,6 +99,9 @@ jobs:
           slot-name: 'Production'
           app-settings-json: |
             [
+              {"name":"WEBSITE_RUN_FROM_PACKAGE","value":"1","slotSetting":false},
+              {"name":"WEBSOCKETCONNECTIONS_ENABLED","value":"true","slotSetting":false},
+
               {"name":"DB_URI","value":${{ toJson(secrets.DB_URI) }},"slotSetting":false},
               {"name":"DB_NAME","value":${{ toJson(secrets.DB_NAME) }},"slotSetting":false},
 
@@ -112,9 +123,9 @@ jobs:
               {"name":"REDIS_PORT","value":${{ toJson(secrets.REDIS_PORT) }},"slotSetting":false}
             ]
 
-      - name: Deploy to Azure Web App
+      - name: Deploy to Azure Web App (Run-From-Package)
         uses: azure/webapps-deploy@v3
         with:
           app-name: 'chats'
           slot-name: 'Production'
-          package: './package'
+          package: './package/chats-package.zip'
