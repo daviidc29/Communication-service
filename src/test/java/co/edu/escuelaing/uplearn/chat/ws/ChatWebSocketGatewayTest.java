@@ -49,8 +49,13 @@ class ChatWebSocketGatewayTest {
     }
 
     @Test
+    void initRedisListener_conContainerNull_noFalla() {
+        ChatWebSocketGateway localGw = new ChatWebSocketGateway(authz, chatService, reservations, redis, null);
+        assertDoesNotThrow(localGw::initRedisListener);
+    }
+
+    @Test
     void initRedisListener_registraListener_yEntregaMensajes_OK() throws Exception {
-        // Preparamos sesiones para u1 (una funciona, otra lanza IOException)
         WebSocketSession okSession = mock(WebSocketSession.class);
         WebSocketSession failingSession = mock(WebSocketSession.class);
         doThrow(new IOException("boom")).when(failingSession).sendMessage(any(TextMessage.class));
@@ -60,8 +65,7 @@ class ChatWebSocketGatewayTest {
         Set<WebSocketSession> set = new HashSet<>();
         set.add(okSession);
         set.add(failingSession);
-        sessions.put("u1", set); // fromUserId tendrá sesiones
-        // toUserId = u2 no tiene sesiones -> rama con emptySet
+        sessions.put("u1", set);
 
         ArgumentCaptor<MessageListener> listenerCap = ArgumentCaptor.forClass(MessageListener.class);
         ArgumentCaptor<Topic> topicCap = ArgumentCaptor.forClass(Topic.class);
@@ -75,7 +79,6 @@ class ChatWebSocketGatewayTest {
 
         MessageListener listener = listenerCap.getValue();
 
-        // Caso OK: payload válido
         ChatMessageData dto = ChatMessageData.builder()
                 .id("m1")
                 .fromUserId("u1")
@@ -84,8 +87,8 @@ class ChatWebSocketGatewayTest {
                 .build();
         String jsonPayload = json.writeValueAsString(dto);
 
-        org.springframework.data.redis.connection.Message okMsg =
-                mock(org.springframework.data.redis.connection.Message.class);
+        org.springframework.data.redis.connection.Message okMsg = mock(
+                org.springframework.data.redis.connection.Message.class);
         when(okMsg.getBody()).thenReturn(jsonPayload.getBytes(StandardCharsets.UTF_8));
 
         assertDoesNotThrow(() -> listener.onMessage(okMsg, "chat:cid".getBytes(StandardCharsets.UTF_8)));
@@ -93,9 +96,8 @@ class ChatWebSocketGatewayTest {
         verify(okSession, atLeastOnce()).sendMessage(any(TextMessage.class));
         verify(failingSession, atLeastOnce()).sendMessage(any(TextMessage.class));
 
-        // Caso error: payload inválido (cubre catch del listener)
-        org.springframework.data.redis.connection.Message badMsg =
-                mock(org.springframework.data.redis.connection.Message.class);
+        org.springframework.data.redis.connection.Message badMsg = mock(
+                org.springframework.data.redis.connection.Message.class);
         when(badMsg.getBody()).thenReturn("NOT_JSON".getBytes(StandardCharsets.UTF_8));
 
         assertDoesNotThrow(() -> listener.onMessage(badMsg, "chat:cid".getBytes(StandardCharsets.UTF_8)));
@@ -151,29 +153,122 @@ class ChatWebSocketGatewayTest {
         when(chatService.toDto(m)).thenThrow(new RuntimeException("boom"));
 
         assertDoesNotThrow(() -> gw.afterConnectionEstablished(s));
-        // La rama de catch se ejecuta; no esperamos envíos
         verify(s, never()).sendMessage(any());
         verify(chatService).markDelivered(anyList());
     }
 
     @Test
     void afterConnectionEstablished_sinToken_oTokenInvalido_cierra_FAIL() throws Exception {
-        // Sin token
         WebSocketSession s1 = mock(WebSocketSession.class);
         when(s1.getUri()).thenReturn(new URI("ws://x/ws"));
         gw.afterConnectionEstablished(s1);
-        verify(s1).close(argThat(st ->
-                st.getCode() == CloseStatus.NOT_ACCEPTABLE.getCode()
-                        && st.getReason().contains("Falta token")));
+        verify(s1).close(argThat(st -> st.getCode() == CloseStatus.NOT_ACCEPTABLE.getCode()
+                && st.getReason().contains("Falta token")));
 
-        // Token inválido
         WebSocketSession s2 = mock(WebSocketSession.class);
         when(s2.getUri()).thenReturn(new URI("ws://x/ws?token=bad"));
         when(authz.subject("Bearer bad")).thenThrow(new RuntimeException("bad"));
         gw.afterConnectionEstablished(s2);
-        verify(s2).close(argThat(st ->
-                st.getCode() == CloseStatus.NOT_ACCEPTABLE.getCode()
-                        && st.getReason().contains("Token inválido")));
+        verify(s2).close(argThat(st -> st.getCode() == CloseStatus.NOT_ACCEPTABLE.getCode()
+                && st.getReason().contains("Token inválido")));
+    }
+
+    @Test
+    void handleTextMessage_Exito_DestinatarioOnline_RedisOK() throws Exception {
+        WebSocketSession sSender = sessionWithUser("u1", "tokA");
+        WebSocketSession sRecipient = sessionWithUser("u2", "tokB");
+
+        when(reservations.canChat("Bearer tokA", "u2")).thenReturn(true);
+
+        Message savedMsg = Message.builder()
+                .id("msg1")
+                .chatId("chat123")
+                .fromUserId("u1")
+                .toUserId("u2")
+                .content("ENC")
+                .build();
+        when(chatService.chatIdOf("u1", "u2")).thenReturn("chat123");
+        when(chatService.saveMessage("chat123", "u1", "u2", "Hello")).thenReturn(savedMsg);
+
+        ChatMessageData dto = ChatMessageData.builder().id("msg1").content("Hello").build();
+        when(chatService.toDto(savedMsg)).thenReturn(dto);
+
+        gw.handleTextMessage(sSender, new TextMessage("{\"toUserId\":\"u2\",\"content\":\"Hello\"}"));
+
+        verify(chatService).ensureChat("u1", "u2");
+        verify(chatService).saveMessage("chat123", "u1", "u2", "Hello");
+
+        verify(sSender).sendMessage(any(TextMessage.class));
+        verify(sRecipient).sendMessage(any(TextMessage.class));
+
+        verify(chatService).markDelivered(anyList());
+        assertTrue(savedMsg.isDelivered());
+
+        verify(redis).convertAndSend(eq("chat:chat123"), anyString());
+    }
+
+    @Test
+    void handleTextMessage_Exito_DestinatarioOffline_RedisOK() throws Exception {
+        WebSocketSession sSender = sessionWithUser("u1", "tokA");
+
+        when(reservations.canChat("Bearer tokA", "uOffline")).thenReturn(true);
+
+        Message savedMsg = Message.builder()
+                .id("msg2")
+                .chatId("chat999")
+                .fromUserId("u1")
+                .toUserId("uOffline")
+                .content("ENC")
+                .delivered(false)
+                .build();
+
+        when(chatService.chatIdOf("u1", "uOffline")).thenReturn("chat999");
+        when(chatService.saveMessage("chat999", "u1", "uOffline", "Hi")).thenReturn(savedMsg);
+
+        when(chatService.toDto(savedMsg)).thenReturn(ChatMessageData.builder().content("Hi").build());
+
+        gw.handleTextMessage(sSender, new TextMessage("{\"toUserId\":\"uOffline\",\"content\":\"Hi\"}"));
+
+        verify(sSender).sendMessage(any(TextMessage.class));
+
+        assertFalse(savedMsg.isDelivered());
+        verify(chatService, never()).markDelivered(anyList());
+
+        verify(redis).convertAndSend(eq("chat:chat999"), anyString());
+    }
+
+    @Test
+    void handleTextMessage_Exito_MarkDeliveredFalla_NoRompeFlujo() throws Exception {
+        WebSocketSession sSender = sessionWithUser("u1", "tokA");
+        sessionWithUser("u2", "tokB"); 
+
+        when(reservations.canChat("Bearer tokA", "u2")).thenReturn(true);
+
+        Message savedMsg = Message.builder().id("m").chatId("c").build();
+        when(chatService.saveMessage(any(), any(), any(), any())).thenReturn(savedMsg);
+        when(chatService.toDto(savedMsg)).thenReturn(ChatMessageData.builder().build());
+
+        doThrow(new RuntimeException("DB error")).when(chatService).markDelivered(anyList());
+
+        assertDoesNotThrow(
+                () -> gw.handleTextMessage(sSender, new TextMessage("{\"toUserId\":\"u2\",\"content\":\"H\"}")));
+
+        verify(redis).convertAndSend(eq("chat:c"), anyString());
+    }
+
+    @Test
+    void handleTextMessage_RedisNull_NoPublica() throws Exception {
+        gw = new ChatWebSocketGateway(authz, chatService, reservations, null, container);
+        WebSocketSession s = sessionWithUser("u1", "tok");
+
+        when(reservations.canChat(any(), any())).thenReturn(true);
+        Message m = Message.builder().chatId("c").build();
+        when(chatService.saveMessage(any(), any(), any(), any())).thenReturn(m);
+        when(chatService.toDto(m)).thenReturn(ChatMessageData.builder().build());
+
+        gw.handleTextMessage(s, new TextMessage("{\"toUserId\":\"u2\",\"content\":\"H\"}"));
+
+        verifyNoInteractions(redis);
     }
 
     @Test
@@ -183,15 +278,14 @@ class ChatWebSocketGatewayTest {
 
         gw.handleTextMessage(s, new TextMessage("algo"));
 
-        verify(s).close(argThat(st ->
-                st.getCode() == CloseStatus.NOT_ACCEPTABLE.getCode()
-                        && st.getReason().contains("No autenticado")));
+        verify(s).close(argThat(st -> st.getCode() == CloseStatus.NOT_ACCEPTABLE.getCode()
+                && st.getReason().contains("No autenticado")));
     }
 
     @Test
     void handleTextMessage_payloadBlanco_ignora_OK() throws Exception {
         WebSocketSession s = sessionWithUser("u1");
-        reset(reservations, chatService, redis);
+        clearInvocations(reservations, chatService, redis);
 
         gw.handleTextMessage(s, new TextMessage("   "));
 
@@ -201,7 +295,7 @@ class ChatWebSocketGatewayTest {
     @Test
     void handleTextMessage_pingYOtrosIgnorados_OK() throws Exception {
         WebSocketSession s = sessionWithUser("u1");
-        reset(reservations, chatService, redis);
+        clearInvocations(reservations, chatService, redis);
 
         gw.handleTextMessage(s, new TextMessage("ping"));
         gw.handleTextMessage(s, new TextMessage("{\"type\":\"PING\"}"));
@@ -212,11 +306,9 @@ class ChatWebSocketGatewayTest {
     @Test
     void handleTextMessage_payloadInvalido_oCamposFaltantes_ignora_FAIL() throws Exception {
         WebSocketSession s = sessionWithUser("u1");
-        reset(reservations, chatService, redis);
+        clearInvocations(reservations, chatService, redis);
 
-        // NO JSON -> cae en catch de parseo
         gw.handleTextMessage(s, new TextMessage("NO_JSON"));
-        // JSON válido pero campos requeridos vacíos
         gw.handleTextMessage(s, new TextMessage("{\"toUserId\":\"\",\"content\":\"\"}"));
 
         verifyNoInteractions(reservations, chatService, redis);
@@ -225,32 +317,13 @@ class ChatWebSocketGatewayTest {
     @Test
     void handleTextMessage_sinAutorizacionPorReservas_enviaError_FAIL() throws Exception {
         WebSocketSession s = sessionWithUser("u1", "tokAuth");
-        reset(chatService, redis); // no nos importa lo de afterConnectionEstablished
-
+        
         when(reservations.canChat("Bearer tokAuth", "u2")).thenReturn(false);
 
         gw.handleTextMessage(s, new TextMessage("{\"toUserId\":\"u2\",\"content\":\"hola\"}"));
 
-        verify(s).sendMessage(argThat((TextMessage tm) ->
-                tm.getPayload().contains("No autorizado")));
+        verify(s).sendMessage(argThat((TextMessage tm) -> tm.getPayload().contains("No autorizado")));
         verify(redis, never()).convertAndSend(anyString(), anyString());
-    }
-
-    @Test
-    void handleTextMessage_enviaMensaje_OK() throws Exception {
-        WebSocketSession s = sessionWithUser("u1", "tokX");
-        reset(reservations, chatService, redis);
-
-        when(reservations.canChat("Bearer tokX", "u2")).thenReturn(true);
-        when(chatService.chatIdOf("u1", "u2")).thenReturn("cid");
-        Message saved = Message.builder().id("m1").build();
-        when(chatService.saveMessage("cid", "u1", "u2", "hola")).thenReturn(saved);
-        when(chatService.toDto(saved)).thenReturn(ChatMessageData.builder()
-                .id("m1").fromUserId("u1").toUserId("u2").build());
-
-        gw.handleTextMessage(s, new TextMessage("{\"toUserId\":\"u2\",\"content\":\"hola\"}"));
-
-        verify(redis).convertAndSend(eq("chat:cid"), anyString());
     }
 
     @Test
@@ -261,13 +334,11 @@ class ChatWebSocketGatewayTest {
         gw.afterConnectionClosed(s, CloseStatus.NORMAL);
         assertFalse(sessionsMap().containsKey("u1"));
 
-        // Sin userId -> simplemente no hace nada
         WebSocketSession s2 = mock(WebSocketSession.class);
         when(s2.getAttributes()).thenReturn(new HashMap<>());
         assertDoesNotThrow(() -> gw.afterConnectionClosed(s2, CloseStatus.NORMAL));
     }
 
-    // ---- helpers ----
 
     private WebSocketSession sessionWithUser(String userId) throws Exception {
         return sessionWithUser(userId, "tok");

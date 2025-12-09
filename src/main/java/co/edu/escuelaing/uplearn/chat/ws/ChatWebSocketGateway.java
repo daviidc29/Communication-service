@@ -150,9 +150,10 @@ public class ChatWebSocketGateway extends TextWebSocketHandler {
 
     /**
      * Maneja los mensajes de texto entrantes de un cliente WebSocket.
-     * Valida el mensaje, verifica autorizaciones y publica o entrega el mensaje.
+     * Valida, persiste y entrega mensajes, y publica en Redis si está configurado.
+     * 
      * @param session la sesión WebSocket del cliente.
-     * @param message el mensaje de texto recibido.
+     * @param message el mensaje de texto entrante.
      * @throws Exception en caso de errores durante el manejo del mensaje.
      */
     @Override
@@ -163,52 +164,139 @@ public class ChatWebSocketGateway extends TextWebSocketHandler {
             return;
         }
 
-        final String payload = message.getPayload();
-        if (payload == null || payload.isBlank() || "ping".equalsIgnoreCase(payload.trim()))
+        SendMessageRequest req = parseAndValidatePayload(message.getPayload());
+        if (req == null) {
             return;
+        }
+
+        if (!isAuthorizedToChat(session, userId, req.getToUserId())) {
+            return;
+        }
+
+        Message savedMessage = persistMessage(userId, req.getToUserId(), req.getContent());
+        String serializedDto = json.writeValueAsString(chatService.toDto(savedMessage));
+
+        boolean recipientOnline = deliverLocally(userId, req.getToUserId(), serializedDto);
+
+        if (recipientOnline) {
+            markMessageAsDelivered(savedMessage);
+        }
+
+        publishToRedis(savedMessage.getChatId(), serializedDto);
+    }
+
+    /**
+     * Parsea y valida el payload JSON entrante.
+     * Ignora mensajes de ping y verifica campos requeridos.
+     * 
+     * @param payload el payload JSON entrante.
+     * @return la solicitud de envío de mensaje válida, o null si es inválida o un ping.
+     * @throws IOException en caso de errores de parseo.
+     */
+    private SendMessageRequest parseAndValidatePayload(String payload) throws IOException {
+        if (payload == null || payload.isBlank() || "ping".equalsIgnoreCase(payload.trim())) {
+            return null;
+        }
 
         JsonNode root;
         try {
             root = json.readTree(payload);
         } catch (Exception ex) {
             log.debug("WS: ignorando payload no JSON: {}", payload);
-            return;
+            return null;
         }
-        if (root.has("type") && "ping".equalsIgnoreCase(root.get("type").asText()))
-            return;
+
+        if (root.has("type") && "ping".equalsIgnoreCase(root.get("type").asText())) {
+            return null;
+        }
 
         SendMessageRequest req = json.treeToValue(root, SendMessageRequest.class);
-        String toUserId = req.getToUserId();
-        String content = req.getContent();
-        if (toUserId == null || toUserId.isBlank() || content == null || content.isBlank()) {
+        if (req.getToUserId() == null || req.getToUserId().isBlank() || req.getContent() == null
+                || req.getContent().isBlank()) {
             log.warn("WS: payload inválido, faltan campos requeridos: {}", payload);
-            return;
+            return null;
         }
+        return req;
+    }
 
+    /**
+     * Verifica si el usuario está autorizado para chatear con otro usuario.
+     * Envía un mensaje de error y retorna false si no está autorizado.
+     * 
+     * @param session    la sesión WebSocket del cliente.
+     * @param fromUserId el ID del usuario que envía el mensaje.
+     * @param toUserId   el ID del usuario destinatario.
+     * @return true si está autorizado, false en caso contrario.
+     * @throws IOException en caso de errores al enviar mensajes.
+     */
+    private boolean isAuthorizedToChat(WebSocketSession session, String fromUserId, String toUserId) throws IOException {
         String token = UriComponentsBuilder.fromUri(session.getUri()).build().getQueryParams()
                 .getFirst(QUERY_PARAM_TOKEN);
         String bearer = BEARER_PREFIX + token;
 
         if (!reservations.canChat(bearer, toUserId)) {
-            log.warn("Bloqueado intento de chat entre {} y {} sin reservas válidas", userId, toUserId);
+            log.warn("Bloqueado intento de chat entre {} y {} sin reservas válidas", fromUserId, toUserId);
             session.sendMessage(
                     new TextMessage(json.writeValueAsString(Map.of("error", "No autorizado para chatear"))));
-            return;
+            return false;
         }
+        return true;
+    }
 
-        String chatId = chatService.chatIdOf(userId, toUserId);
-        chatService.ensureChat(userId, toUserId);
-        Message saved = chatService.saveMessage(chatId, userId, toUserId, content);
-        ChatMessageData dto = chatService.toDto(saved);
+    /**
+     * Persiste un mensaje en el sistema de chat.
+     * 
+     * @param fromUserId el ID del usuario que envía el mensaje.
+     * @param toUserId   el ID del usuario destinatario.
+     * @param content    el contenido del mensaje.
+     * @return el mensaje persistido.
+     */
+    private Message persistMessage(String fromUserId, String toUserId, String content) {
+        String chatId = chatService.chatIdOf(fromUserId, toUserId);
+        chatService.ensureChat(fromUserId, toUserId);
+        return chatService.saveMessage(chatId, fromUserId, toUserId, content);
+    }
 
-        String serialized = json.writeValueAsString(dto);
+    /**
+     * Entrega un mensaje serializado a ambos usuarios localmente.
+     * 
+     * @param fromUserId    el ID del usuario que envía el mensaje.
+     * @param toUserId      el ID del usuario destinatario.
+     * @param serializedDto el mensaje serializado en formato JSON.
+     * @return true si el destinatario está en línea, false en caso contrario.
+     */
+    private boolean deliverLocally(String fromUserId, String toUserId, String serializedDto) {
+        boolean recipientOnline = !sessionsByUser.getOrDefault(toUserId, Collections.emptySet()).isEmpty();
 
-        // Publicación: si hay Redis, publícalo; si no, entrégalo localmente.
+        deliverTo(toUserId, serializedDto);
+        deliverTo(fromUserId, serializedDto);
+
+        return recipientOnline;
+    }
+
+    /**
+     * Marca un mensaje como entregado en el sistema de chat.
+     * 
+     * @param message el mensaje a marcar como entregado.
+     */
+    private void markMessageAsDelivered(Message message) {
+        message.setDelivered(true);
+        try {
+            chatService.markDelivered(Collections.singletonList(message));
+        } catch (Exception ignored) {
+            // Ignorar errores al marcar como entregado
+        }
+    }
+
+    /**
+     * Publica un mensaje serializado en Redis para entrega distribuida.
+     * 
+     * @param chatId        el ID del chat.
+     * @param serializedDto el mensaje serializado en formato JSON.
+     */
+    private void publishToRedis(String chatId, String serializedDto) {
         if (redis != null) {
-            redis.convertAndSend("chat:" + chatId, serialized);
-        } else {
-            deliverTo(toUserId, serialized);
-            deliverTo(userId, serialized);
+            redis.convertAndSend("chat:" + chatId, serializedDto);
         }
     }
 
@@ -217,7 +305,7 @@ public class ChatWebSocketGateway extends TextWebSocketHandler {
      * Limpia la sesión del usuario desconectado.
      * 
      * @param session la sesión WebSocket del cliente.
-     * @param status el estado de cierre de la conexión.
+     * @param status  el estado de cierre de la conexión.
      * @throws Exception en caso de errores durante la desconexión.
      */
     @Override

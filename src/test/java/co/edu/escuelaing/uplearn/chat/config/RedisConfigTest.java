@@ -16,6 +16,23 @@ class RedisConfigTest {
         TestUtils.setField(cfg, "port", 6379);
         LettuceConnectionFactory f = cfg.redisConnectionFactory();
         assertNotNull(f);
+        assertFalse(f.isUseSsl());
+    }
+
+    @Test
+    void redisConnectionFactory_withPasswordAndSsl_OK() {
+        RedisConfig cfg = new RedisConfig();
+        TestUtils.setField(cfg, "host", "localhost");
+        TestUtils.setField(cfg, "port", 6379);
+        TestUtils.setField(cfg, "password", "secret123");
+        TestUtils.setField(cfg, "ssl", true);
+
+        LettuceConnectionFactory f = cfg.redisConnectionFactory();
+        f.afterPropertiesSet();
+
+        assertNotNull(f);
+        assertTrue(f.isUseSsl());
+        assertEquals("secret123", f.getPassword());
     }
 
     @Test
