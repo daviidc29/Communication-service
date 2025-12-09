@@ -1,51 +1,80 @@
-# Docs for the Azure Web Apps Deploy action: https://github.com/Azure/webapps-deploy
-# More GitHub Actions for Azure: https://github.com/Azure/actions
-
 name: Build and deploy JAR app to Azure Web App - chats
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: windows-latest
     permissions:
-      contents: read #This is required for actions/checkout
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Java version
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'microsoft'
+          cache: 'maven'
 
-      - name: Build with Maven
-        run: mvn clean install
+      - name: Build with Maven (boot jar)
+        run: mvn -B clean package -DskipTests
 
-      - name: Upload artifact for deployment job
+      - name: Prepare deployment package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "${{ github.workspace }}\azure-package" | Out-Null
+
+          $jar = Get-ChildItem -Path "${{ github.workspace }}\target" -Filter *.jar |
+                 Where-Object { $_.Name -notmatch 'sources|javadoc|original|plain' } |
+                 Sort-Object Length -Descending | Select-Object -First 1
+          if (-not $jar) { throw "No se encontró un JAR ejecutable en target." }
+
+          Copy-Item $jar.FullName "${{ github.workspace }}\azure-package\app.jar" -Force
+
+          # web.config para Windows (HTTP_PLATFORM_PORT)
+          @"
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <system.webServer>
+    <handlers>
+      <add name="httpPlatformHandler" path="*" verb="*" modules="httpPlatformHandler" resourceType="Unspecified"/>
+    </handlers>
+    <httpPlatform processPath="java"
+                  arguments="-Dserver.port=%HTTP_PLATFORM_PORT% -jar &quot;.\app.jar&quot;"
+                  stdoutLogEnabled="true"
+                  stdoutLogFile=".\logs\stdout"
+                  startupTimeLimit="120"
+                  processesPerApplication="1">
+    </httpPlatform>
+  </system.webServer>
+</configuration>
+"@ | Out-File -FilePath "${{ github.workspace }}\azure-package\web.config" -Encoding UTF8 -Force
+
+      - name: Upload artifact for deploy
         uses: actions/upload-artifact@v4
         with:
           name: java-app
-          path: '${{ github.workspace }}/target/*.jar'
+          path: '${{ github.workspace }}/azure-package'
 
   deploy:
     runs-on: windows-latest
     needs: build
     permissions:
-      id-token: write #This is required for requesting the JWT
-      contents: read #This is required for actions/checkout
+      id-token: write
+      contents: read
 
     steps:
-      - name: Download artifact from build job
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
           name: java-app
-      
+          path: './package'
+
       - name: Login to Azure
         uses: azure/login@v2
         with:
@@ -53,11 +82,39 @@ jobs:
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_0DE79F80756B4D219BC382C784648F5A }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_8BDE2F9C0DE04E599F0868B0DF9928B2 }}
 
+      # (Opcional si ya las pusiste a mano en el portal)
+      # Empuja App Settings desde GitHub Secrets a la Web App "chats"
+      - name: Set Azure App Settings
+        uses: azure/appservice-settings@v1
+        with:
+          app-name: 'chats'
+          slot-name: 'Production'
+          app-settings-json: |
+            [
+              {"name":"DB_URI","value":${{ toJson(secrets.DB_URI) }},"slotSetting":false},
+              {"name":"DB_NAME","value":${{ toJson(secrets.DB_NAME) }},"slotSetting":false},
+
+              {"name":"USERS_BASE","value":${{ toJson(secrets.USERS_BASE) }},"slotSetting":false},
+              {"name":"USERS_PUBLIC_PATH","value":${{ toJson(secrets.USERS_PUBLIC_PATH) }},"slotSetting":false},
+              {"name":"RESERVATIONS_BASE","value":${{ toJson(secrets.RESERVATIONS_BASE) }},"slotSetting":false},
+
+              {"name":"APP_CORS_ALLOWED","value":${{ toJson(secrets.APP_CORS_ALLOWED) }},"slotSetting":false},
+
+              {"name":"ROLES_CACHE_TTL","value":${{ toJson(secrets.ROLES_CACHE_TTL) }},"slotSetting":false},
+              {"name":"ROLES_CACHE_MAX","value":${{ toJson(secrets.ROLES_CACHE_MAX) }},"slotSetting":false},
+              {"name":"PROFILES_CACHE_TTL","value":${{ toJson(secrets.PROFILES_CACHE_TTL) }},"slotSetting":false},
+              {"name":"PROFILES_CACHE_MAX","value":${{ toJson(secrets.PROFILES_CACHE_MAX) }},"slotSetting":false},
+
+              {"name":"CHAT_CRYPTO_SECRET","value":${{ toJson(secrets.CHAT_CRYPTO_SECRET) }},"slotSetting":false},
+
+              {"name":"REDIS_ENABLED","value":"false","slotSetting":false},
+              {"name":"REDIS_HOST","value":${{ toJson(secrets.REDIS_HOST) }},"slotSetting":false},
+              {"name":"REDIS_PORT","value":${{ toJson(secrets.REDIS_PORT) }},"slotSetting":false}
+            ]
+
       - name: Deploy to Azure Web App
-        id: deploy-to-webapp
         uses: azure/webapps-deploy@v3
         with:
           app-name: 'chats'
           slot-name: 'Production'
-          package: '*.jar'
-          
+          package: './package'
