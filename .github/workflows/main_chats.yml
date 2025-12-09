@@ -21,7 +21,6 @@ jobs:
           distribution: 'microsoft'
           cache: 'maven'
 
-      # Asegura que se genere un BOOT jar ejecutable
       - name: Build with Maven (boot jar)
         run: mvn -B clean package -DskipTests
 
@@ -30,36 +29,24 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "${{ github.workspace }}\azure-package" | Out-Null
 
-          # Toma el JAR "boot" (no sources/javadoc/original/plain). Debe pesar decenas de MB.
+          # Selecciona el BOOT jar (no sources/javadoc/original/plain)
           $jar = Get-ChildItem -Path "${{ github.workspace }}\target" -Filter *.jar |
                  Where-Object { $_.Name -notmatch 'sources|javadoc|original|plain' } |
                  Sort-Object Length -Descending | Select-Object -First 1
-          if (-not $jar) { throw "No se encontró un JAR ejecutable en target. Revisa el spring-boot-maven-plugin." }
+          if (-not $jar) { throw "No se encontró un JAR ejecutable en target. Revisa spring-boot-maven-plugin." }
 
-          Write-Host "Boot JAR: $($jar.Name) ($([math]::Round($jar.Length/1MB,2)) MB)"
-          if ($jar.Length -lt 20000000) { Write-Warning "El JAR pesa menos de 20MB; probablemente NO es un boot-jar." }
+          # Verificación rápida (debería tener BOOT-INF y pesar varias decenas de MB)
+          $jarTool = "${env:JAVA_HOME}\bin\jar.exe"; if (-not (Test-Path $jarTool)) { $jarTool = "jar" }
+          $hasBootInf = & $jarTool tf $jar.FullName | Select-String -SimpleMatch "BOOT-INF/" -Quiet
+          if (-not $hasBootInf) { throw "El JAR NO es un boot-jar (falta BOOT-INF/)." }
+          if ($jar.Length -lt 20000000) { throw "El JAR pesa <20MB; probablemente no es un boot-jar válido." }
 
           Copy-Item $jar.FullName "${{ github.workspace }}\azure-package\app.jar" -Force
 
-          # web.config: IIS lanza 'java -Dserver.port=%HTTP_PLATFORM_PORT% -jar .\app.jar'
-          @"
-<?xml version="1.0" encoding="utf-8"?>
-<configuration>
-  <system.webServer>
-    <handlers>
-      <add name="httpPlatformHandler" path="*" verb="*" modules="httpPlatformHandler" resourceType="Unspecified" />
-    </handlers>
-    <httpPlatform
-        processPath="java"
-        arguments="-Djava.net.preferIPv4Stack=true -Dserver.port=%HTTP_PLATFORM_PORT% -jar &quot;.\app.jar&quot;"
-        stdoutLogEnabled="true"
-        stdoutLogFile=".\logs\stdout"
-        startupTimeLimit="300"
-        processesPerApplication="1">
-    </httpPlatform>
-  </system.webServer>
-</configuration>
-"@ | Out-File -FilePath "${{ github.workspace }}\azure-package\web.config" -Encoding UTF8 -Force
+          # Copia web.config DESDE LA RAÍZ DEL REPO
+          $web = Join-Path $env:GITHUB_WORKSPACE 'web.config'
+          if (-not (Test-Path $web)) { throw "web.config no encontrado en la raíz del repo." }
+          Copy-Item $web "${{ github.workspace }}\azure-package\web.config" -Force
 
           # Empaqueta a ZIP (Run-From-Package)
           Compress-Archive -Path "${{ github.workspace }}\azure-package\*" -DestinationPath "${{ github.workspace }}\chats-package.zip" -Force
@@ -91,7 +78,6 @@ jobs:
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_0DE79F80756B4D219BC382C784648F5A }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_8BDE2F9C0DE04E599F0868B0DF9928B2 }}
 
-      # Empuja App Settings a la Web App "chats"
       - name: Set Azure App Settings
         uses: azure/appservice-settings@v1
         with:
